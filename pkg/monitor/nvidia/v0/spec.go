@@ -121,6 +121,17 @@ func (s Spec) DeviceMemoryTotal(idx int) uint64 {
 	return v
 }
 
+// DeviceMemoryMonitor returns the NVML-reported real GPU memory usage for device idx.
+// This value is written by HAMi-core's memory_monitor_watcher thread via
+// nvmlDeviceGetComputeRunningProcesses and represents what nvidia-smi reports.
+func (s Spec) DeviceMemoryMonitor(idx int) uint64 {
+	v := uint64(0)
+	for _, p := range s.sr.procs {
+		v += p.monitorused[idx]
+	}
+	return v
+}
+
 func (s Spec) DeviceSmUtil(idx int) uint64 {
 	v := uint64(0)
 	for _, p := range s.sr.procs {

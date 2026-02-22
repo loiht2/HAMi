@@ -58,6 +58,7 @@ type UsageInfo interface {
 	DeviceMemoryBufferSize(idx int) uint64
 	DeviceMemoryOffset(idx int) uint64
 	DeviceMemoryTotal(idx int) uint64
+	DeviceMemoryMonitor(idx int) uint64
 	DeviceSmUtil(idx int) uint64
 	SetDeviceSmLimit(l uint64)
 	IsValidUUID(idx int) bool
