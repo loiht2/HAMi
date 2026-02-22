@@ -141,6 +141,12 @@ var (
 		"Container device memory buffer size",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid"}, nil,
 	)
+
+	ctrvGPURealMemoryDesc = prometheus.NewDesc(
+		"vGPU_device_memory_usage_real_in_bytes",
+		"Real GPU device memory usage per container from NVML (equivalent to nvidia-smi)",
+		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid"}, nil,
+	)
 )
 
 // Describe is implemented with DescribeByCollect. That's possible because the
@@ -156,6 +162,7 @@ func (cc ClusterManagerCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- ctrDeviceMemoryContextDesc
 	ch <- ctrDeviceMemoryModuleDesc
 	ch <- ctrDeviceMemoryBufferDesc
+	ch <- ctrvGPURealMemoryDesc
 	//prometheus.DescribeByCollect(cc, ch)
 }
 
@@ -200,6 +207,56 @@ func (cc ClusterManagerCollector) Describe(ch chan<- *prometheus.Desc) {
 //	return added
 //}
 
+// pidDeviceKey identifies a specific process on a specific GPU for NVML memory lookup.
+type pidDeviceKey struct {
+	pid  uint32
+	uuid string // GPU UUID truncated to 40 chars
+}
+
+// buildNVMLProcessMemoryMap queries NVML for all compute processes on all GPUs
+// and returns a map from (hostPID, gpuUUID) to UsedGpuMemory in bytes.
+// This gives the nvidia-smi-equivalent per-process memory.
+func buildNVMLProcessMemoryMap() map[pidDeviceKey]uint64 {
+	result := make(map[pidDeviceKey]uint64)
+	nvret := nvml.Init()
+	if nvret != nvml.SUCCESS {
+		klog.V(3).Infof("NVML init for process memory map: %s (real memory metric will be skipped)", nvml.ErrorString(nvret))
+		return result
+	}
+	defer nvml.Shutdown()
+
+	devnum, nvret := nvml.DeviceGetCount()
+	if nvret != nvml.SUCCESS {
+		klog.Warningf("NVML DeviceGetCount failed: %s", nvml.ErrorString(nvret))
+		return result
+	}
+
+	for i := range devnum {
+		device, nvret := nvml.DeviceGetHandleByIndex(i)
+		if nvret != nvml.SUCCESS {
+			continue
+		}
+		gpuUUID, nvret := device.GetUUID()
+		if nvret != nvml.SUCCESS {
+			continue
+		}
+		if len(gpuUUID) > 40 {
+			gpuUUID = gpuUUID[0:40]
+		}
+		procs, nvret := device.GetComputeRunningProcesses()
+		if nvret != nvml.SUCCESS {
+			continue
+		}
+		for _, p := range procs {
+			key := pidDeviceKey{pid: p.Pid, uuid: gpuUUID}
+			result[key] += p.UsedGpuMemory
+		}
+	}
+
+	klog.V(4).Infof("Built NVML process memory map with %d entries", len(result))
+	return result
+}
+
 // Collect first triggers the ReallyExpensiveAssessmentOfTheSystemState. Then it
 // creates constant metrics for each host on the fly based on the returned data.
 //
@@ -208,6 +265,9 @@ func (cc ClusterManagerCollector) Describe(ch chan<- *prometheus.Desc) {
 func (cc ClusterManagerCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.Info("Starting to collect metrics for vGPUMonitor")
 
+	// Build NVML per-process memory map (hostPID + gpuUUID -> memory bytes)
+	nvmlProcessMem := buildNVMLProcessMemoryMap()
+
 	// Collect GPU information
 	if err := cc.collectGPUInfo(ch); err != nil {
 		klog.Errorf("Failed to collect GPU info: %v", err)
@@ -215,7 +275,7 @@ func (cc ClusterManagerCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// Collect Pod and Container information
-	if err := cc.collectPodAndContainerInfo(ch); err != nil {
+	if err := cc.collectPodAndContainerInfo(ch, nvmlProcessMem); err != nil {
 		klog.Errorf("Failed to collect Pod and Container info: %v", err)
 		// Decide whether to continue or return based on business requirements
 	}
@@ -342,7 +402,7 @@ func (cc ClusterManagerCollector) collectGPUUtilizationMetrics(ch chan<- prometh
 	return nil
 }
 
-func (cc ClusterManagerCollector) collectPodAndContainerInfo(ch chan<- prometheus.Metric) error {
+func (cc ClusterManagerCollector) collectPodAndContainerInfo(ch chan<- prometheus.Metric, nvmlProcessMem map[pidDeviceKey]uint64) error {
 	nodeName := os.Getenv(util.NodeNameEnvName)
 	if nodeName == "" {
 		return fmt.Errorf("node name environment variable %s is not set", util.NodeNameEnvName)
@@ -380,7 +440,7 @@ func (cc ClusterManagerCollector) collectPodAndContainerInfo(ch chan<- prometheu
 			for _, c := range podContainers {
 				if c.ContainerName == ctr.Name {
 					klog.V(5).Infof("Processing Container %s in Pod %s/%s", ctr.Name, pod.Namespace, pod.Name)
-					if err := cc.collectContainerMetrics(ch, pod, ctr, c, nowSec); err != nil {
+					if err := cc.collectContainerMetrics(ch, pod, ctr, c, nowSec, nvmlProcessMem); err != nil {
 						klog.Errorf("Failed to collect metrics for container %s in Pod %s/%s: %v", ctr.Name, pod.Namespace, pod.Name, err)
 					}
 					break // Exit the inner loop after finding the matching container
@@ -400,7 +460,7 @@ func (cc ClusterManagerCollector) isPodUIDMatched(pod *corev1.Pod, podUID string
 	return string(pod.UID) == podUID
 }
 
-func (cc ClusterManagerCollector) collectContainerMetrics(ch chan<- prometheus.Metric, pod *corev1.Pod, ctr corev1.Container, c *nvidia.ContainerUsage, nowSec int64) error {
+func (cc ClusterManagerCollector) collectContainerMetrics(ch chan<- prometheus.Metric, pod *corev1.Pod, ctr corev1.Container, c *nvidia.ContainerUsage, nowSec int64, nvmlProcessMem map[pidDeviceKey]uint64) error {
 	// Validate inputs
 	if c == nil || c.Info == nil {
 		klog.Errorf("Container or ContainerInfo is nil for Pod %s/%s, Container %s", pod.Namespace, pod.Name, ctr.Name)
@@ -464,6 +524,22 @@ func (cc ClusterManagerCollector) collectContainerMetrics(ch chan<- prometheus.M
 			lastSec := max(nowSec-lastKernelTime, 0)
 			if err := sendMetric(ch, ctrDeviceLastKernelDesc, prometheus.GaugeValue, float64(lastSec), labels...); err != nil {
 				klog.Errorf("Failed to send last kernel time metric: %v", err)
+				return err
+			}
+		}
+
+		// Emit NVML-based real memory metric (nvidia-smi equivalent)
+		if len(nvmlProcessMem) > 0 {
+			hostPids := c.Info.HostPids()
+			realMem := uint64(0)
+			for _, pid := range hostPids {
+				key := pidDeviceKey{pid: uint32(pid), uuid: uuid}
+				if mem, ok := nvmlProcessMem[key]; ok {
+					realMem += mem
+				}
+			}
+			if err := sendMetric(ch, ctrvGPURealMemoryDesc, prometheus.GaugeValue, float64(realMem), labels...); err != nil {
+				klog.Errorf("Failed to send real memory metric: %v", err)
 				return err
 			}
 		}

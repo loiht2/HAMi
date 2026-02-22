@@ -197,3 +197,13 @@ func (s Spec) GetUtilizationSwitch() int32 {
 func (s Spec) SetUtilizationSwitch(v int32) {
 	s.sr.utilizationSwitch = v
 }
+
+func (s Spec) HostPids() []int32 {
+	pids := make([]int32, 0)
+	for _, p := range s.sr.procs[:int(s.sr.procnum)] {
+		if p.hostpid > 0 {
+			pids = append(pids, p.hostpid)
+		}
+	}
+	return pids
+}

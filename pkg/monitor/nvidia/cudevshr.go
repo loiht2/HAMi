@@ -71,6 +71,7 @@ type UsageInfo interface {
 	SetRecentKernel(v int32)
 	GetUtilizationSwitch() int32
 	SetUtilizationSwitch(v int32)
+	HostPids() []int32
 }
 
 type ContainerUsage struct {

@@ -13,6 +13,6 @@ vgpuvalidator
 _output/
 coverage.out
 .DS_Store
-HAMi-DRA/
-k8s-dra-driver/
 hami-system/
+HAMi-core-fix-memory/
+/vGPUmonitor
