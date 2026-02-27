@@ -134,6 +134,18 @@ monitor:
     nodePort:
       ## Metrics port (NodePort). If not specified, Kubernetes will assign a random port
       metrics: ""
+  ## ServiceMonitor for Prometheus Operator
+  ## Creates a ServiceMonitor so Prometheus scrapes each monitor pod individually
+  serviceMonitor:
+    enabled: true
+    ## Scrape interval
+    interval: "15s"
+    ## Scrape timeout
+    scrapeTimeout: "10s"
+    ## Metrics path
+    path: "/metrics"
+    ## Additional labels for the ServiceMonitor (e.g. to match a specific Prometheus selector)
+    labels: {}
 
 # Certificate configuration
 certs:
