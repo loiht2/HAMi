@@ -1,0 +1,6 @@
+dependencies:
+- name: hami-dra
+  repository: file://charts/hami-dra
+  version: 0.1.0
+digest: sha256:c752b74992acd8f98aad698a9e7f91ced57add033ebd14ec2fdc535ff8e3ec15
+generated: "2026-02-27T18:09:47.908580926+09:00"
