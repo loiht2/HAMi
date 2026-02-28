@@ -282,22 +282,37 @@ curl -s http://localhost:8080/metrics | grep "# HELP vGPU_device_memory"
 
 When a GPU workload is running, the monitor exposes the following metrics on port `8080`:
 
-### Memory Metrics (12 total)
+### Container-level Metrics (from HAMi-core shared memory)
 
 | Metric | Unit | Source |
 |--------|------|--------|
-| `vGPU_device_memory_usage_in_bytes` | bytes | HAMi-core shm (cudaMalloc tracking) |
-| `vGPU_device_memory_usage_in_MiB` | MiB | Same |
-| `vGPU_device_memory_usage_real_in_bytes` | bytes | **NVML** (process RSS — matches `nvidia-smi`) |
-| `vGPU_device_memory_usage_real_in_MiB` | MiB | **NVML** (process RSS — matches `nvidia-smi`) |
-| `vGPU_device_memory_limit_in_bytes` | bytes | HAMi-core shm |
-| `vGPU_device_memory_limit_in_MiB` | MiB | HAMi-core shm |
-| `vGPU_device_memory_buffer_size_bytes` | bytes | HAMi-core shm |
-| `vGPU_device_memory_buffer_size_MiB` | MiB | HAMi-core shm |
-| `vGPU_device_memory_context_size_bytes` | bytes | HAMi-core shm |
-| `vGPU_device_memory_context_size_MiB` | MiB | HAMi-core shm |
-| `vGPU_device_memory_module_size_bytes` | bytes | HAMi-core shm |
-| `vGPU_device_memory_module_size_MiB` | MiB | HAMi-core shm |
+| `Device_memory_desc_of_container` | bytes | HAMi-core shm (cudaMalloc tracking) |
+| `Device_utilization_desc_of_container` | % | HAMi-core shm (SM utilization) |
+| `Device_last_kernel_of_container` | seconds | HAMi-core shm (since last kernel) |
+| `vGPU_device_memory_usage_in_MiB` | MiB | HAMi-core shm (cudaMalloc tracked, rounded) |
+| `vGPU_device_memory_usage_real_in_MiB` | MiB | **NVML** (process RSS — matches `nvidia-smi`, rounded) |
+| `vGPU_device_memory_limit_in_MiB` | MiB | HAMi-core shm (rounded) |
+| `vGPU_device_memory_buffer_size_MiB` | MiB | HAMi-core shm (rounded) |
+| `vGPU_device_memory_context_size_MiB` | MiB | HAMi-core shm (rounded) |
+| `vGPU_device_memory_module_size_MiB` | MiB | HAMi-core shm (rounded) |
+
+### Pod-level Allocation Metrics (from DRA cache)
+
+| Metric | Unit | Source |
+|--------|------|--------|
+| `vGPUDeviceCoreAllocated` | cores | DRA ResourceClaim allocation |
+| `vGPUDeviceMemoryAllocated` | MB | DRA ResourceClaim allocation |
+
+### Node-level GPU Metrics (from DRA cache)
+
+| Metric | Unit | Source |
+|--------|------|--------|
+| `GPUDeviceMemoryLimit` | MB | DRA ResourceSlice |
+| `GPUDeviceCoreLimit` | cores | DRA ResourceSlice |
+| `GPUDeviceMemoryAllocated` | MB | DRA ResourceSlice |
+| `GPUDeviceCoreAllocated` | cores | DRA ResourceSlice |
+
+> **Note:** The bytes-unit variants (e.g. `vGPU_device_memory_usage_in_bytes`) are commented out in the source code and can be re-enabled if needed.
 
 ### Why `usage_real` > `usage`
 

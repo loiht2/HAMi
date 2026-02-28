@@ -16,3 +16,7 @@ coverage.out
 hami-system/
 HAMi-core-fix-memory/
 /vGPUmonitor
+tpl-pod-hami-dra.yaml
+pod-hami-dra.yaml
+HAMi-DRA/
+k8s-dra-driver/

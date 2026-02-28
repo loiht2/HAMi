@@ -32,6 +32,7 @@ spec:
             - --kube-api-burst={{ .Values.monitor.kubeAPIBurst | default 60 }}
             - --collect-interval={{ .Values.monitor.collectInterval | default "30s" }}
             - --hook-path={{ .Values.monitor.nodeLevel.hookPath | default "/usr/local/vgpu" }}
+            - --node-name=$(NODE_NAME)
             {{- range .Values.monitor.extraArgs }}
             - {{ . | quote }}
             {{- end }}
