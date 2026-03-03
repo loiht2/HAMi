@@ -2,18 +2,21 @@
 
 This document describes what this fork (`loiht2/HAMi`) changes compared to the upstream [`Project-HAMi/HAMi`](https://github.com/Project-HAMi/HAMi), and how to install it via Helm on a fresh cluster.
 
+**Branch:** `feat/dra-monitor-container-dirs` (consistent across all repositories)
+
 ---
 
 ## Table of Contents
 
 1. [Overview of Changes](#overview-of-changes)
 2. [Repository Structure](#repository-structure)
-3. [What Changed: Code](#what-changed-code)
-4. [What Changed: Helm Chart](#what-changed-helm-chart)
-5. [Prerequisites](#prerequisites)
-6. [Helm Installation](#helm-installation)
-7. [Verifying the Deployment](#verifying-the-deployment)
-8. [Available Metrics](#available-metrics)
+3. [Related Repositories](#related-repositories)
+4. [What Changed: Code](#what-changed-code)
+5. [What Changed: Helm Chart](#what-changed-helm-chart)
+6. [Prerequisites](#prerequisites)
+7. [Helm Installation](#helm-installation)
+8. [Verifying the Deployment](#verifying-the-deployment)
+9. [Available Metrics](#available-metrics)
 
 ---
 
@@ -27,7 +30,7 @@ This fork extends HAMi's DRA (Dynamic Resource Allocation) subsystem to provide 
 | DRA enabled by default | `dra.enabled: false` | `dra.enabled: true` |
 | Monitor deployment mode | Single Deployment | Node-level DaemonSet (accesses shared memory per node) |
 | Real GPU memory usage (NVML) | Not available | `vGPU_device_memory_usage_real_in_MiB` via NVML |
-| Memory metrics in MiB | Not available | All 6 memory metrics exposed in MiB and bytes |
+| Memory metrics in MiB | Not available | All 6 memory metrics exposed in MiB |
 | Container GPU driver | `containerDriver: true` (bundled) | `containerDriver: false` (uses host driver) |
 | Images | `ghcr.io/projecthami/k8s-dra-driver:v0.0.1-dev` | `docker.io/loihoangthanh1411/hami-dra:v1.3` |
 
@@ -35,62 +38,88 @@ This fork extends HAMi's DRA (Dynamic Resource Allocation) subsystem to provide 
 
 ## Repository Structure
 
-This fork includes three modified sub-repositories that are checked in or referenced:
+This fork includes three modified sub-repositories that work together:
 
 ```
-HAMi/
-├── charts/hami/                        # ← Modified: HAMi parent Helm chart
-│   ├── Chart.yaml                      # ← hami-dra dependency: local file://
-│   ├── values.yaml                     # ← DRA enabled, custom images v1.3
+HAMi/                                   # ← This repo: parent Helm chart
+├── charts/hami/
+│   ├── Chart.yaml                      # hami-dra dependency: local file://
+│   ├── values.yaml                     # DRA enabled, custom images v1.5
 │   └── charts/
-│       ├── hami-dra/                   # ← Embedded HAMi-DRA subchart source
-│       └── hami-dra-0.1.0.tgz         # ← Built by helm dependency build
-├── HAMi-DRA/                           # ← Modified subchart source (submodule)
-│   └── charts/hami-dra/
-└── k8s-dra-driver/                     # ← Modified DRA driver + monitor (submodule)
-    └── cmd/
-        ├── hami-dra/                   # ← DRA driver binary
-        └── hami-dra-monitor/           # ← Monitor with real memory metrics
+│       ├── hami-dra/                   # Embedded HAMi-DRA subchart source
+│       └── hami-dra-0.1.0.tgz         # Built by helm dependency build
 ```
+
+---
+
+## Related Repositories
+
+All repositories use the same branch: **`feat/dra-monitor-container-dirs`**
+
+| Repository | Role | Key Docs |
+|------------|------|----------|
+| [`loiht2/HAMi`](https://github.com/loiht2/HAMi) | Parent Helm chart; embeds HAMi-DRA as subchart | This README |
+| [`loiht2/HAMi-core-fix-memory`](https://github.com/loiht2/HAMi-core-fix-memory) | LD_PRELOAD CUDA interceptor; fixes container memory tracking; adds `memory_monitor_watcher` thread for NVML data | [Change Coverage](https://github.com/loiht2/HAMi-core-fix-memory/blob/feat/dra-monitor-container-dirs/docs/change-coverage.md) |
+| [`loiht2/HAMi-DRA`](https://github.com/loiht2/HAMi-DRA) | DRA webhook + **HAMi-DRA-monitor** DaemonSet; reads shared memory and exposes Prometheus metrics | [Monitor Docs](https://github.com/loiht2/HAMi-DRA/blob/feat/dra-monitor-container-dirs/docs/MONITOR.md) |
+| [`loiht2/k8s-dra-driver`](https://github.com/loiht2/k8s-dra-driver) | DRA kubelet plugin; creates `containers/{podUID}_{containerName}/` cache dirs for HAMi-core | [DRA Monitor Integration](https://github.com/loiht2/k8s-dra-driver/blob/feat/dra-monitor-container-dirs/docs/dra-monitor-integration.md) |
 
 ---
 
 ## What Changed: Code
 
-### 1. HAMi-core — `memory_monitor_watcher` Thread
+### 1. HAMi-core — Memory Fix & `memory_monitor_watcher` Thread
 
-**Repository:** [`loiht2/HAMi-core`](https://github.com/loiht2/HAMi-core) (branch: `feat/fix-memory-monitor`)
+**Repository:** [`loiht2/HAMi-core-fix-memory`](https://github.com/loiht2/HAMi-core-fix-memory) (branch: `feat/dra-monitor-container-dirs`)
 
-A background thread was added to `HAMi-core` (the LD_PRELOAD CUDA interceptor library) that periodically writes the **real GPU memory usage per container** into shared memory using NVML.
+Three key changes were made to HAMi-core (the LD_PRELOAD CUDA interceptor library):
 
-- **File:** `src/memory_monitor.c` (new)
-- **Function:** `memory_monitor_watcher()` — polls `nvmlDeviceGetComputeRunningProcesses()` every 1 second, matches PIDs inside the container's cgroup, and writes total usage into `monitorused[]` in the existing shared memory struct (`sharedRegionT`)
-- **Impact:** All existing HAMi-core shared memory consumers (monitor, scheduler) can now read real NVML-reported usage without spawning `nvidia-smi`
+**a) Fix container vs host GPU memory tracking** — The NVML process memory query was comparing container-namespace PIDs against NVML-reported host PIDs, causing zero memory readings. Fixed by matching against `hostpid` instead of `pid`. Also added `get_gpu_memory_real_usage()` which returns `max(NVML, tracked)` for conservative OOM detection.
 
-### 2. HAMi-DRA Monitor — `DeviceMemoryMonitor()` and MiB Metrics
+**b) Fix memory underflow guards** — `cuMemGetInfo_v2` and `nvmlDeviceGetMemoryInfo` could underflow when `usage > limit`. Now returns `free = 0` instead of wrapping or erroring.
+
+**c) Add `memory_monitor_watcher` thread** — A new background thread in `src/multiprocess/multiprocess_utilization_watcher.c` polls `nvmlDeviceGetComputeRunningProcesses()` every 1 second and writes results into `procs[].monitorused[]` in shared memory. This runs **unconditionally** (regardless of SM limit config), ensuring the HAMi-DRA-monitor always has real NVML memory data to read.
+
+**Files changed:** `src/allocator/allocator.c`, `src/cuda/memory.c`, `src/multiprocess/multiprocess_memory_limit.c`, `src/multiprocess/multiprocess_memory_limit.h`, `src/multiprocess/multiprocess_utilization_watcher.c`, `src/nvml/hook.c`
+
+See the full [Change Coverage Document](https://github.com/loiht2/HAMi-core-fix-memory/blob/feat/dra-monitor-container-dirs/docs/change-coverage.md) for detailed per-file analysis.
+
+### 2. HAMi-DRA-monitor — Real Memory Metrics via DaemonSet
 
 **Repository:** [`loiht2/HAMi-DRA`](https://github.com/loiht2/HAMi-DRA) (branch: `feat/dra-monitor-container-dirs`)
 
-The monitor daemon was extended to:
+The HAMi-DRA-monitor is deployed as a **separate node-level DaemonSet** (not a sidecar) that:
 
-- **`DeviceMemoryMonitor(idx)`**: reads `shm.monitorused` from the HAMi-core shared memory file at `/tmp/hami/vgpu-<containerID>` and exports it as `vGPU_device_memory_usage_real_in_MiB`
-- **MiB metrics**: added MiB (mebibyte) versions of all 6 existing byte-scale memory metrics for human readability in dashboards
+- Mounts the host's `/usr/local/vgpu/containers/` directory
+- Scans HAMi-core shared memory (`.cache`) files for each `{podUID}_{containerName}` directory
+- Reads `monitorused[]` from shared memory for real NVML-reported GPU memory
+- Exposes per-container Prometheus metrics including `vGPU_device_memory_usage_real_in_MiB`
 
-**New metrics added:**
+The DaemonSet mode is required because HAMi-core shared memory files exist at host paths on each GPU node — a single Deployment would only see shared memory from one node.
+
+See the full [Monitor Documentation](https://github.com/loiht2/HAMi-DRA/blob/feat/dra-monitor-container-dirs/docs/MONITOR.md) for metrics reference and configuration.
 
 | Metric | Description |
 |--------|-------------|
 | `vGPU_device_memory_usage_real_in_MiB` | Real GPU memory usage per container from NVML (matches `nvidia-smi`) |
-| `vGPU_device_memory_usage_real_in_bytes` | Same, in bytes |
 | `vGPU_device_memory_usage_in_MiB` | HAMi-core tracked usage in MiB |
 | `vGPU_device_memory_limit_in_MiB` | vGPU memory limit in MiB |
 | `vGPU_device_memory_buffer_size_MiB` | Buffer size in MiB |
 | `vGPU_device_memory_context_size_MiB` | Context size in MiB |
 | `vGPU_device_memory_module_size_MiB` | Module size in MiB |
 
-### 3. NodeLevel Monitor (DaemonSet instead of Deployment)
+### 3. k8s-dra-driver — Cache Directory Alignment
 
-The monitor was changed from a single `Deployment` to a **node-level DaemonSet** (`nodeLevel.enabled: true`). This is required because HAMi-core shared memory files exist at the host path `/tmp/hami/` on each GPU node — a single Deployment would only see shared memory from the node it runs on.
+**Repository:** [`loiht2/k8s-dra-driver`](https://github.com/loiht2/k8s-dra-driver) (branch: `feat/dra-monitor-container-dirs`)
+
+The DRA kubelet plugin was changed to create cache directories using the same naming convention as the traditional device plugin:
+
+```
+/usr/local/vgpu/containers/{podUID}_{containerName}/
+```
+
+Instead of the previous `claims/{claimUID}/` layout. A `resolveContainerInfo()` method resolves the pod UID and container name from the ResourceClaim, including support for template-based ResourceClaims via `pod.Status.ResourceClaimStatuses`.
+
+See the full [DRA Monitor Integration Document](https://github.com/loiht2/k8s-dra-driver/blob/feat/dra-monitor-container-dirs/docs/dra-monitor-integration.md) for architecture details.
 
 ---
 
@@ -138,7 +167,7 @@ hami-dra:
     image:
       registry: docker.io
       repository: loihoangthanh1411/hami-dra-monitor
-      tag: "v1.3"
+      tag: "v1.5"
       pullPolicy: IfNotPresent
 
   drivers:
@@ -147,7 +176,7 @@ hami-dra:
       image:
         registry: docker.io
         repository: loihoangthanh1411/hami-dra
-        tag: "v1.3"
+        tag: "v1.5"
         pullPolicy: IfNotPresent
 ```
 
@@ -284,6 +313,11 @@ When a GPU workload is running, the monitor exposes the following metrics on por
 
 ### Container-level Metrics (from HAMi-core shared memory)
 
+These metrics are read from HAMi-core shared memory by the HAMi-DRA-monitor DaemonSet running on each node.
+
+**Base labels:** `podnamespace`, `podname`, `ctrname`, `vdeviceid`, `deviceuuid`
+**Extended labels** (on `usage_real` and `limit` only): `pod_uid`, `image`, `image_id`, `device_type`
+
 | Metric | Unit | Source |
 |--------|------|--------|
 | `Device_memory_desc_of_container` | bytes | HAMi-core shm (cudaMalloc tracking) |
@@ -295,6 +329,8 @@ When a GPU workload is running, the monitor exposes the following metrics on por
 | `vGPU_device_memory_buffer_size_MiB` | MiB | HAMi-core shm (rounded) |
 | `vGPU_device_memory_context_size_MiB` | MiB | HAMi-core shm (rounded) |
 | `vGPU_device_memory_module_size_MiB` | MiB | HAMi-core shm (rounded) |
+
+See the full [Monitor Documentation](https://github.com/loiht2/HAMi-DRA/blob/feat/dra-monitor-container-dirs/docs/MONITOR.md) for complete metric reference, label descriptions, and Prometheus integration.
 
 ### Pod-level Allocation Metrics (from DRA cache)
 
