@@ -13,6 +13,12 @@ webhooks:
         name: {{ .Release.Name }}-dra-webhook
         namespace: {{ .Release.Namespace }}
         path: /mutate
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - {{ .Release.Namespace }}
     rules:
       - apiGroups:
           - ""
@@ -24,5 +30,6 @@ webhooks:
           - pods
         scope: '*'
     sideEffects: None
+    failurePolicy: Ignore
     timeoutSeconds: 10
 {{- end }}
